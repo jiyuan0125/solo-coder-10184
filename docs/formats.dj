@@ -1,0 +1,571 @@
+# Formats
+
+jaq supports reading and writing several data formats.
+This section describes these data formats.
+
+You can load and write data in these formats using either:
+
+- the command-line options [`--from`](#--from) / [`--to`](#--to), or
+- [(de-)serialisation filters](#serialisation-deserialisation) such as
+  [`fromjson`](#fromjson-tojson) and [`toyaml`](#fromyaml-toyaml)
+
+The command-line options `--from` and `--to` always yield
+better or equal performance than the corresponding filters.
+
+## JSON
+
+[JSON](https://www.json.org) (JavaScript Object Notation)
+is specified in [RFC 8259](https://datatracker.ietf.org/doc/html/rfc8259).
+
+jaq can read all valid JSON values; however, like `jq`,
+it also accepts certain values that are invalid JSON.
+This set of values is documented in the [XJON](#xjon) section.
+
+## XJON
+
+The native data format of jaq is a superset of JSON called *XJON*
+(eXtended JavaScript Object Notation, pronounced like "action").
+
+XJON extends JSON with following constructs:
+
+- Line comments: `# ... \n` is interpreted as comment
+- Special floating-point numbers: `NaN`, `Infinity`, `+Infinity`, `-Infinity`
+- Numbers starting with `+` or multiple zeros:
+  The beginning of a number corresponds to the regex
+  `[+-]?\d+` in XJON and
+  `-?(0|[1-9]\d*)` in JSON.
+  That means that in XJON,
+  `+7.1`, `007`, `-042` are all valid numbers, whereas they are invalid in JSON.
+- UTF-8 strings with invalid code units:
+  The JSON standard is slightly ambiguous whether
+  strings may contain invalid UTF-8 code units.
+  XJON explicitly allows for invalid code units in UTF-8 strings,
+  e.g. the output of `printf '"\xFF"'`.
+  This increases compatibility with tools that output such strings (e.g. file names).
+  Furthermore, it allows for constant-time loading of strings via [`--rawfile`](#--rawfile),
+  where jq takes linear time due to UTF-8 validation.
+- Byte strings:
+  A byte string is created via `b"..."`, where `...` is a sequence of:
+
+    - bytes in the range 0x20 to (including) 0xFF,
+      excluding the ASCII characters `'"'` and `'\'`
+    - an escape sequence, starting with a backslash (`'\'`) and followed by
+      `b`, `f`, `n`, `r`, `t`, `'"'`, `'\'`, or
+      `xHH`, where `HH` is a hexadecimal number
+  For example: `b"Here comes \xFF, dadadada\nHere comes \xFF\nAnd I say: \"It's alright\"\x00"`.
+  Byte strings of this shape can also be found in other languages, like
+  Rust & Python (with leading `b`) and JavaScript & C (without leading `b`).
+- Objects with non-string keys:
+  Where JSON limits object keys to strings,
+  XJON allows arbitrary values as object keys.
+  For example: `{null: 0, true: 1, 2: 3, "str": 4, ["arr"]: 5, {}: 6}`
+
+The goal behind XJON was to
+support a set of values present in [YAML](#yaml) and [CBOR](#cbor), namely
+byte strings and objects with non-string keys, while keeping the format
+both human-readable and simple & performant to parse, like JSON.
+
+XJON can losslessly encode any jaq [value](#values); in particular,
+decoding an XJON-encoded value is equivalent to the original value.
+For example:
+
+- `nan |        .          | isnan --> true` in jaq and `jq`
+- `nan | tojson | fromjson | isnan --> true` in jaq, but `false` in `jq`
+
+That means that `tojson | fromjson` is equivalent to `.` in jaq, whereas
+it is _not_ equivalent in `jq`, in particular because of `NaN` and `Infinity`.
+
+Currently, wherever jaq accepts JSON, it also accepts XJON.
+That means that jaq accepts the following, even if it is not valid JSON:
+
+```
+$ echo 'NaN b"Bytes" {1: 2} # Over and out' | jaq --from json -c
+NaN
+b"Bytes"
+{1:2}
+```
+
+## YAML
+
+[YAML](https://yaml.org/) (YAML Ain't Markup Language™) is
+"a human-friendly data serialization language for all programming languages".
+It is also a JSON and XJON superset.
+That means that every jaq value can be encoded as YAML value.
+
+jaq supports reading YAML with anchors (`&foo`) and aliases (`*foo`).
+These allow the creation of shared data structures.
+However, jaq does not support self-referential data, i.e.
+data that contains an alias pointing to itself.
+For example:
+
+- `"[&a 1, &b 2, *a, *b]" | fromyaml --> [1, 2, 1, 2]`
+- `"[&b [&a [], *a], *b]" | fromyaml --> [[[], []], [[], []]]`
+- `"&a[*a]" | try fromyaml catch -1 --> -1`
+
+jaq validates tags for scalar YAML values, such as
+`null`, booleans, numbers, and strings:
+
+- `"!!bool true" | fromyaml --> true`
+- `"!!int  true" | try fromyaml catch "fail" --> "fail"`
+
+On the other hand, jaq ignores tags for arrays and objects:
+
+- `"!!foo []" | fromyaml --> []`
+- `"!!bar {}" | fromyaml --> {}`
+
+jaq produces YAML that is very close to JSON/XJON.
+jaq's compact YAML output differs from XJON mostly by writing
+byte strings as Base64-encoded `!!binary` string and
+special floating-point values as `.inf`, `-.inf`, and `.nan`:
+
+```
+[infinite, -infinite, nan, ("a" | tobytes), {"a": 1}] | tojson, toyaml -->
+"[Infinity,-Infinity,NaN,b\"a\",{\"a\":1}]"
+"[.inf, -.inf, .nan, !!binary YQ==, {a: 1}]"
+```
+
+jaq preserves invalid UTF-8 sequences in text strings when writing YAML.
+However, jaq yields an error when trying to
+parse YAML containing invalid UTF-8 sequences.
+
+When using `--to yaml`, jaq writes
+`---` before every output value and
+`...` after  every output value.
+This is done to indicate the start/end of YAML documents.
+For example:
+
+```
+$ jaq -n '[1, {a: 2, b: [3]}]' --to yaml
+---
+- 1
+-
+  a: 2
+  b:
+    - 3
+...
+$ echo 1 2 | jaq --to yaml
+---
+1
+...
+---
+2
+...
+```
+
+Use [`-j`](#--join-output) to omit YAML document start/end markers.
+This can come in handy when merging multiple arrays:
+
+```
+$ echo '[1, 2] [3, 4]' | jaq --to yaml -j
+- 1
+- 2
+- 3
+- 4
+```
+
+Both `--from yaml` and the filter `fromyaml`
+load the full input into memory before parsing it.
+
+
+## CBOR
+
+[CBOR](https://cbor.io/) (Concise Binary Object Representation)
+is a binary format specified in
+[RFC 8949](https://www.rfc-editor.org/rfc/rfc8949.html).
+
+CBOR values are a superset of jaq values.
+That means that there are CBOR values for which there are no equivalent jaq values, for example:
+
+- [date-time](https://www.rfc-editor.org/rfc/rfc8949.html#name-epoch-based-date-time)
+- [undefined](https://www.rfc-editor.org/rfc/rfc8949.html#name-undefined-values)
+- [decimal fractions and bigfloats](https://www.rfc-editor.org/rfc/rfc8949.html#fractions)
+
+jaq fails when trying to decode such CBOR values.
+
+Every jaq value can be encoded losslessly as a CBOR value, except for
+text strings with invalid UTF-8 code units.
+Invalid UTF-8 sequences are replaced with `U+FFFD`, which looks like this: "�".
+
+jaq writes sequences of CBOR values by concatenating them without any separator.
+That means that `--to cbor` is equivalent to `--to cbor --join-output`.
+jaq can also read sequences of concatenated CBOR values.
+
+
+## TOML
+
+[TOML](https://toml.io) is a configuration file format.
+We can read and query TOML files like JSON files:
+
+```
+$ jaq '.profile.release["codegen-units"]' Cargo.toml
+1
+```
+
+Furthermore, we can also write TOML files:
+
+```
+$ echo 'a = {b = 1, c = {d = nan, e = [], f = [{g = inf}, {h = -inf}]}}' | jaq --from toml --to toml
+[a]
+b = 1
+
+[a.c]
+d = nan
+e = []
+
+[[a.c.f]]
+g = inf
+
+[[a.c.f]]
+h = -inf
+```
+
+Compared to jaq values,
+TOML has date-time values, but
+TOML has neither
+`null`,
+byte strings, nor
+non-string object keys.
+Furthermore, the root of a TOML value must be an object.
+That means that TOML writing may fail in various ways:
+
+- `0                | try totoml catch -1 --> -1` (non-object root)
+- `{a: null       } | try totoml catch -1 --> -1` (null)
+- `{a: 0 | tobytes} | try totoml catch -1 --> -1` (byte string)
+- `{(1): 2        } | try totoml catch -1 --> -1` (non-string object key)
+
+jaq can read [TOML 1.1.0](https://toml.io/en/v1.1.0) values,
+except for date-time values.
+jaq should generally be able to read TOML values it has written,
+with the exception of big integers.
+The next example creates an object `{a: 2^1024}` containing a big integer,
+successfully writes it as TOML, then fails when trying to read it back:
+
+`{a: nth(1024; 1 | recurse(.*2))} | totoml | try fromtoml catch -1 --> -1`
+
+When writing TOML, jaq converts invalid UTF-8 sequences as for [CBOR](#cbor).
+That means that even if reading a written TOML value succeeds,
+its output may not be the same as its input:
+
+`{a: [-255] | implode} | (totoml | fromtoml) == . --> false`
+
+
+## XML
+
+jaq reads data adhering to the [XML 1.0](https://www.w3.org/TR/xml/) standard.
+However, it treats only XML data encoded as UTF-8.
+
+jaq can read XHTML files, but it cannot directly read HTML files.
+You can use tools such as
+[html2xhtml](https://github.com/jfisteus/html2xhtml) to convert HTML to XHTML.
+
+Mappings between XML to JSON generally have to make a compromise between
+"friendliness" and round-tripping;
+see "[Experiences with JSON and XML Transformations](https://www.w3.org/2011/10/integration-workshop/p/XML_JSON_mapping_paper.pdf)".
+Here, "friendliness" means that JSON generated from XML has a flat structure,
+making it easy to consume it.
+Stefan Goessner gives a nice discussion of different "friendly" mappings in
+"[Converting Between XML and JSON](https://www.xml.com/pub/a/2006/05/31/converting-between-xml-and-json.html)".
+The take-away message is: "Friendly" mappings lose information.
+For that reason, jaq does not use a "friendly" mapping, but rather
+a mapping that preserves XML information perfectly,
+making it suitable for round-tripping.
+
+As an example, consider the following input:
+
+``` xml
+<a href="https://www.w3.org">World Wide Web Consortium (<em>W3C</em>)</a>
+```
+
+We can see its internal representation in jaq by:
+
+```
+$ echo '<a href="https://www.w3.org">World Wide Web Consortium (<em>W3C</em>)</a>' \
+| jaq --from xml .
+{
+  "t": "a",
+  "a": {
+    "href": "https://www.w3.org"
+  },
+  "c": [
+    "World Wide Web Consortium (",
+    {
+      "t": "em",
+      "c": [
+        "W3C"
+      ]
+    },
+    ")"
+  ]
+}
+```
+
+### TAC objects
+
+Tags are represented by _TAC objects_. A TAC object may have the following fields:
+
+- `t`: Name of the tag, such as `h1` for `<h1>...</h1>`.
+  This field must always be present in a TAC object.
+- `a`: Attributes of the tag, such as `{"id": "foo", style: "color:blue;"}`.
+  If this field is present, it must contain an object with string values.
+- `c`: Children of the tag.
+  If this field is not present, this tag will be interpreted as self-closing (such as `<br/>`).
+  When a TAC object produced by jaq (either via `--from xml` or `fromxml`)
+  has the `c` field, it always holds an array of XML values.
+  When writing XML values (either via `--to xml` or `toxml`),
+  jaq accepts any XML value at the `c` field.
+
+An example query to obtain all links in an XHTML file:
+
+``` jq
+.. | select(.t? == "a") | .a.href
+```
+
+We can also transform input XML and yield output XML.
+For example, to transform all `em` tags to `i` tags:
+
+``` jq
+(.. | select(.t? == "em") | .t) = "i"
+```
+
+To yield XML output instead of JSON output, use the option `--to xml`:
+
+```
+$ echo '<a href="https://www.w3.org">World Wide Web Consortium (<em>W3C</em>)</a>' \
+| jaq --from xml --to xml '(.. | select(.t? == "em") | .t) = "i"'
+<a href="https://www.w3.org">World Wide Web Consortium (<i>W3C</i>)</a>
+```
+
+Finally, we can extract all text from an XML file (discarding CDATA blocks):
+
+``` jq
+def xml_text: if isstring then . else .c[]? | xml_text end; [xml_text]
+```
+
+### Other values
+
+- Strings are neither escaped nor unescaped; that means,
+   `Tom &amp; Jerry`  in the source XML becomes
+  `"Tom &amp; Jerry"` in the target JSON.
+  The [`@html`/`@htmld`](#athtml) filters can be used for manual (un-)escaping.
+- A comment such as `<!-- this comment -->`{.xml} is converted to
+  `{"comment": " this comment "}`{.json}.
+- A CDATA block such as `<![CDATA[Tom & Jerry]]>`{.xml} is converted to
+  `{"cdata": "Tom & Jerry"}`{.json}.
+- An XML declaration such as
+  `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`{.xml} is converted to
+  `{"xmldecl": {"version": "1.0", "encoding": "UTF-8", "standalone": "yes"}}`{.json}.
+  (Note that the values given in this declaration, such as the encoding,
+  are ignored by jaq's XML parser.)
+- A processing instruction such as
+  `<?xml-stylesheet href="common.css"?>`{.xml} is converted to
+  `{"pi": {"target": "xml-stylesheet", "content": "href=\"common.css\""}}`{.json}.
+
+To put all of this together, consider the following XML file:
+
+``` shell
+$ cat examples/test.xhtml
+<?xml version='1.0'?>
+<?xml-stylesheet href="common.css"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <body>
+    <!-- CDATA blocks do not require escaping -->
+    <![CDATA[Hello & goodbye!]]><br/>
+  </body>
+</html>
+```
+
+This yields the following in jaq:
+
+```
+$ jaq . examples/test.xhtml
+{
+  "xmldecl": {
+    "version": "1.0"
+  }
+}
+{
+  "pi": {
+    "target": "xml-stylesheet",
+    "content": "href=\"common.css\""
+  }
+}
+{
+  "doctype": {
+    "name": "html"
+  }
+}
+{
+  "t": "html",
+  "a": {
+    "xmlns": "http://www.w3.org/1999/xhtml"
+  },
+  "c": [
+    "\n  ",
+    {
+      "t": "body",
+      "c": [
+        "\n    ",
+        {
+          "comment": " CDATA blocks do not require escaping "
+        },
+        "\n    ",
+        {
+          "cdata": "Hello & goodbye!"
+        },
+        {
+          "t": "br"
+        },
+        "\n  "
+      ]
+    },
+    "\n"
+  ]
+}
+```
+
+The output contains several values consisting only of whitespace, such as `"\n    "`.
+These are conserved by jaq because XML is a whitespace-sensitive format.
+
+
+## CSV / TSV
+
+[CSV](https://www.rfc-editor.org/rfc/rfc4180) (Comma-Separated Values) and
+TSV (Tabulator-Separated Values) are tabular data formats.
+A CSV/TSV table consists of rows of fields.
+Rows are separated by newlines.
+Fields are separated by commas in CSV and tabs in TSV.
+
+jaq interprets each row as an array of values:
+
+```
+$ printf "a,b\n1,2\n3,4" | jaq -c --from csv
+["a","b"]
+[1,2]
+[3,4]
+$ printf "a,b\n1,2\n3,4" | jaq -c --from csv --slurp
+[["a","b"],[1,2],[3,4]]
+```
+
+When writing tables using `--to`, jaq prints the raw output of the filter
+[`tocsv`](#fromcsv-tocsv) / [`totsv`](#fromtsv-totsv):
+
+```
+$ jaq -n '["a","b"], [1,2], [3,4]' --to csv
+"a","b"
+1,2
+3,4
+$ jaq -n '["a","b"], [1,2], [3,4] | @csv' --raw-output
+"a","b"
+1,2
+3,4
+```
+
+### Headers
+
+jaq currently does not provide any special handling for table headers,
+where the first row of a table contains field names.
+However, there are a few filters in `examples/table.jq`
+that aim to simplify handling of tables with headers.
+If you find these filters useful or have a problem with them,
+please [leave your feedback](https://github.com/01mf02/jaq/issues/418)
+to help me decide whether to integrate them into jaq's standard library.
+Let us see their usage.
+
+For example, let us look at
+[Ferris Bueller](https://en.wikipedia.org/wiki/Ferris_Bueller%27s_Day_Off)'s student record:
+
+```
+$ cat examples/ferris.csv
+ID,Name,Home phone,Days absent
+38-106,"Bueller, Ferris",555-6452,9
+```
+
+Hmmm, this is a bit hard to read, and Edward R. Rooney, Dean of Students, is a busy man.
+Let us help him out a bit:
+
+```
+$ jaq -L examples 'include "table"; from_table' -s examples/ferris.csv
+{
+  "ID": "38-106",
+  "Name": "Bueller, Ferris",
+  "Home phone": "555-6452",
+  "Days absent": 9
+}
+```
+
+Ah, much better. So what does Edward R. Rooney have to say about Ferris to Ferris's mom?
+
+> "So far this semester, he has been absent nine times."
+> --- "Nine times?"
+> --- "Nine times."
+> --- "I don't remember him being sick nine times."
+> --- "That's probably because he wasn't sick. He was skipping school. Wake up and smell the coffee, Mrs. Bueller. It's a fool's paradise. He's just leading you down the primrose path."
+> --- "I can't believe it."
+> --- "I got it right here in front of me. He has missed nine days."
+
+Now it's time for Ferris to shine:
+
+```
+$ jaq -L examples 'include "table"; from_table | .["Days absent"] -= 7' -s examples/ferris.csv
+{
+  "ID": "38-106",
+  "Name": "Bueller, Ferris",
+  "Home phone": "555-6452",
+  "Days absent": 2
+}
+```
+
+> "Grace! GRACE!!!"
+
+Next, let's have a look at Ferris's courses:
+
+```
+$ cat examples/ferris-courses.tsv
+Perds	Days	Course	Teacher	Rm	Grade 1	Grade 2	Grade 3	Grade EX
+01-04	MTWF	Eng Comp	Hollndr	221	B+	A
+05-08	MWTF	Calculus	McMurry	309	B	A-
+09-10	TWTF	Chemistry	Gunner	260	A-	A
+11-13	All	Lunch		Caf
+14-19	MTWF	Gym	Carlyle	127	B+	A-
+23-25	TWTF	Computr Sc	Cohen	114	A-	A
+26-29	MWTF	Utpian Scy	Jardin	241	A	A
+30-32	MTWF	Euro Hist	Rice	334	B+	B+
+```
+
+Let's see ... in which courses did Ferris get a B+ as first grade? Anyone? Anyone?
+
+```
+$ jaq -L examples 'include "table"; with_table(map(select(.["Grade 1"] == "B+")))' \
+  -s examples/ferris-courses.tsv --to tsv
+Perds	Days	Course	Teacher	Rm	Grade 1	Grade 2	Grade 3	Grade EX
+01-04	MTWF	Eng Comp	Hollndr	221	B+	A		
+14-19	MTWF	Gym	Carlyle	127	B+	A-		
+30-32	MTWF	Euro Hist	Rice	334	B+	B+		
+```
+
+Yeah, Ferris ... you still got a bit of work ahead of you on the database.
+
+So far, we slurped in all tables before processing them, using [`-s`](#--slurp).
+This can be wasteful, especially when processing large tables, because
+this reads the whole table into memory.
+We can also read tables row-by-row:
+One useful pattern there is to use
+[`inputs`](#inputs) *without* the habitual [`-n`](#--null-input) option.
+That way, the first row (= header) becomes the filter input,
+and the remaining rows can then be retrieved with `inputs`.
+Putting this together, we can rewrite the previous example:
+
+```
+$ jaq -L examples 'include "table"; ., . as $header | from_row(inputs) | select(.["Grade 1"] == "B+") | to_row($header)' \
+  examples/ferris-courses.tsv --to tsv
+Perds	Days	Course	Teacher	Rm	Grade 1	Grade 2	Grade 3	Grade EX
+01-04	MTWF	Eng Comp	Hollndr	221	B+	A		
+14-19	MTWF	Gym	Carlyle	127	B+	A-		
+30-32	MTWF	Euro Hist	Rice	334	B+	B+		
+```
+
+This concludes our little Ferris Bueller arc.
+If you do not know the film yet, I greatly recommend you to change that.
+And remember: "Life moves pretty fast. If you don't stop and look around once in a while, you could miss it."
+
