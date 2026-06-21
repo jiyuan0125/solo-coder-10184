@@ -54,10 +54,10 @@ pub(crate) fn run(
         let v = match v {
             Ok(v) => v,
             Err(e) => {
-                if let Ok(code) = e.get_halt() {
-                    return Err(Error::Halt(code));
+                match e.get_halt() {
+                    Ok(code) => return Err(Error::Halt(code)),
+                    Err(e) => return Err(Error::Jaq(e.into_err())),
                 }
-                return Err(Error::Jaq(e.into_err()));
             }
         };
 

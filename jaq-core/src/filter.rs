@@ -463,7 +463,9 @@ impl Id {
     /// `f.run((c, v))` returns the output of `v | f` in the context `c`.
     pub fn run<'a, D: DataT>(&self, cv: Cv<'a, D>) -> ValXs<'a, D::V<'a>> {
         use core::iter::once;
-        match &cv.0.lut().terms[self.0] {
+        let terms = &cv.0.lut().terms;
+        let term = &terms[self.0];
+        let result: ValXs<'a, D::V<'a>> = match term {
             Ast::Id => box_once(Ok(cv.1)),
             Ast::Recurse => recurse_run(cv.1, &|v| v.values()),
             Ast::ToString => box_once(Ok(cv.1.into_string())),
@@ -567,6 +569,43 @@ impl Id {
                 flat_map_then(cvs, |cv| (cv.0.lut().funs[*id].run)(cv))
             }
             Ast::Label(id) => label_run(cv, |cv| id.run(cv)),
+        };
+
+        let ctx = Self::context_of(term);
+        Box::new(result.map(move |res| res.map_err(|e| e.with_err_context(ctx))))
+    }
+
+    /// Get the human-readable context description for a term.
+    fn context_of(term: &Ast) -> &'static str {
+        match term {
+            Ast::Id => "identity (.)",
+            Ast::Recurse => "recursion (..)",
+            Ast::ToString => "to string",
+            Ast::Int(_) => "integer literal",
+            Ast::Num(_) => "number literal",
+            Ast::Str(_) => "string literal",
+            Ast::Arr(_) => "array construction",
+            Ast::ObjEmpty => "empty object",
+            Ast::ObjSingle(_, _) => "object construction",
+            Ast::Var(_) => "variable",
+            Ast::CallDef(_, _, _, _) => "function call",
+            Ast::Native(_, _) => "native function call",
+            Ast::Label(_) => "label binding",
+            Ast::Neg(_) => "negation",
+            Ast::Pipe(_, _, _) => "pipe",
+            Ast::Comma(_, _) => "comma (,)",
+            Ast::Assign(_, _) => "assignment",
+            Ast::Update(_, _) => "update assignment",
+            Ast::UpdateMath(_, _, _) => "arithmetic update assignment",
+            Ast::UpdateAlt(_, _) => "alternation update assignment",
+            Ast::Logic(_, _, _) => "logical operation",
+            Ast::Math(_, _, _) => "math operation",
+            Ast::Cmp(_, _, _) => "comparison",
+            Ast::Alt(_, _) => "alternation (//)",
+            Ast::TryCatch(_, _) => "try-catch",
+            Ast::Ite(_, _, _) => "if-then-else",
+            Ast::Fold(_, _, _, _, _) => "fold (reduce/foreach)",
+            Ast::Path(_, _) => "path expression",
         }
     }
 

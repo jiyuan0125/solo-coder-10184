@@ -47,12 +47,22 @@ impl<V> CallInput<V> {
     }
 }
 
-impl<V> Exn<'_, V> {
+impl<'a, V> Exn<'a, V> {
     /// If the exception is an error, yield it, else yield the exception.
     pub fn get_err(self) -> Result<Error<V>, Self> {
         match self.0 {
             Inner::Err(e) => Ok(*e),
             _ => Err(self),
+        }
+    }
+
+    /// Add context to the error if this is an error exception.
+    ///
+    /// For non-error exceptions (halt, break, tail call), this is a no-op.
+    pub fn with_err_context(self, ctx: &'static str) -> Self {
+        match self.0 {
+            Inner::Err(e) => Exn(Inner::Err(Box::new(e.with_context(ctx)))),
+            other => Exn(other),
         }
     }
 
@@ -105,35 +115,74 @@ enum Part<V, S = &'static str> {
 }
 
 /// Error that occurred during filter execution.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Error<V>(Part<V, Vec<Part<V>>>);
+#[derive(Clone, Debug)]
+pub struct Error<V> {
+    /// The core error content
+    inner: Part<V, Vec<Part<V>>>,
+    /// Contextual information to help locate the error
+    ///
+    /// This is additional human-readable context that does not change
+    /// the error's identity. It is ignored for equality comparisons.
+    contexts: Vec<&'static str>,
+}
+
+impl<V> PartialEq for Error<V> where V: PartialEq {
+    fn eq(&self, other: &Self) -> bool {
+        // Context is intentionally ignored for equality comparisons.
+        // It is purely informational and does not change the error's identity.
+        self.inner == other.inner
+    }
+}
+
+impl<V> Eq for Error<V> where V: Eq {}
 
 impl<V> Error<V> {
     /// Create a new error from a value.
     pub fn new(v: V) -> Self {
-        Self(Part::Val(v))
+        Self {
+            inner: Part::Val(v),
+            contexts: Vec::new(),
+        }
+    }
+
+    /// Add context to an error message.
+    ///
+    /// This prepends a context string to the error message,
+    /// helping users locate where the error occurred.
+    /// Context is purely informational and does not affect
+    /// error equality comparisons.
+    pub fn with_context(mut self, ctx: &'static str) -> Self {
+        self.contexts.push(ctx);
+        self
     }
 
     /// Create a path expression error.
     pub fn path_expr(v: V) -> Self {
-        Self(Part::Str(Vec::from([
-            Part::Str("invalid path expression with input "),
-            Part::Val(v),
-        ])))
+        Self {
+            inner: Part::Str(Vec::from([
+                Part::Str("invalid path expression with input "),
+                Part::Val(v),
+            ])),
+            contexts: Vec::new(),
+        }
     }
 
     /// Create a type error.
     pub fn typ(v: V, typ: &'static str) -> Self {
         use Part::{Str, Val};
-        [Str("cannot use "), Val(v), Str(" as "), Str(typ)]
+        let parts: Vec<_> = [Str("cannot use "), Val(v), Str(" as "), Str(typ)]
             .into_iter()
-            .collect()
+            .collect();
+        Self {
+            inner: Part::Str(parts),
+            contexts: Vec::new(),
+        }
     }
 
     /// Create a math error.
     pub fn math(l: V, op: crate::ops::Math, r: V) -> Self {
         use Part::{Str, Val};
-        [
+        let parts: Vec<_> = [
             Str("cannot calculate "),
             Val(l),
             Str(" "),
@@ -142,36 +191,54 @@ impl<V> Error<V> {
             Val(r),
         ]
         .into_iter()
-        .collect()
+        .collect();
+        Self {
+            inner: Part::Str(parts),
+            contexts: Vec::new(),
+        }
     }
 
     /// Create an indexing error.
     pub fn index(l: V, r: V) -> Self {
         use Part::{Str, Val};
-        [Str("cannot index "), Val(l), Str(" with "), Val(r)]
+        let parts: Vec<_> = [Str("cannot index "), Val(l), Str(" with "), Val(r)]
             .into_iter()
-            .collect()
+            .collect();
+        Self {
+            inner: Part::Str(parts),
+            contexts: Vec::new(),
+        }
     }
 }
 
 impl<V: From<String>> Error<V> {
     /// Build an error from something that can be converted to a string.
     pub fn str(s: impl ToString) -> Self {
-        Self(Part::Val(V::from(s.to_string())))
+        Self {
+            inner: Part::Val(V::from(s.to_string())),
+            contexts: Vec::new(),
+        }
     }
 }
 
 impl<V> FromIterator<Part<V>> for Error<V> {
     fn from_iter<T: IntoIterator<Item = Part<V>>>(iter: T) -> Self {
-        Self(Part::Str(iter.into_iter().collect()))
+        Self {
+            inner: Part::Str(iter.into_iter().collect()),
+            contexts: Vec::new(),
+        }
     }
 }
 
 impl<V: From<String> + Display> Error<V> {
     /// Convert the error into a value to be used by `catch` filters.
     pub fn into_val(self) -> V {
-        if let Part::Val(v) = self.0 {
-            v
+        if self.contexts.is_empty() {
+            if let Part::Val(v) = self.inner {
+                v
+            } else {
+                V::from(self.to_string())
+            }
         } else {
             V::from(self.to_string())
         }
@@ -180,7 +247,11 @@ impl<V: From<String> + Display> Error<V> {
 
 impl<V: Display> Display for Error<V> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match &self.0 {
+        // Write contexts first (from outermost to innermost)
+        for ctx in self.contexts.iter().rev() {
+            write!(f, "{}: ", ctx)?;
+        }
+        match &self.inner {
             Part::Val(v) => v.fmt(f),
             Part::Str(parts) => parts.iter().try_for_each(|part| match part {
                 Part::Val(v) => v.fmt(f),
@@ -209,11 +280,12 @@ mod tests {
         assert_eq!(err.to_string(), "test error");
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn halt_does_not_exit_process_via_into_err() {
         // Verify that into_err() does not call process::exit
         let halt: Exn<'_, String> = Exn::halt(1);
-        let result = core::panic::catch_unwind(|| {
+        let result = std::panic::catch_unwind(|| {
             halt.into_err()
         });
         assert!(result.is_ok());

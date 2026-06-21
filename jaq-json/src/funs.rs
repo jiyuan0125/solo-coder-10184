@@ -148,7 +148,7 @@ pub fn bytes_valrs(b: Bytes, f: impl FnOnce(&[u8]) -> ValRs) -> ValRs<'static> {
 /// Obtain length of string that is assumed to be UTF-8 encoded.
 ///
 /// This can be removed once https://github.com/BurntSushi/bstr/pull/223 lands.
-fn utf8_length(mut s: &[u8]) -> usize {
+pub(crate) fn utf8_length(mut s: &[u8]) -> usize {
     let mut count = 0;
     loop {
         // ASCII fast path taken if two consecutive ASCII chars found

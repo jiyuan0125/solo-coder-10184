@@ -29,7 +29,16 @@ fn index_access() {
 
     give(json!([0, 1, 2]), r#".["a", 0, 0 == 0]?"#, json!(0));
     give(json!([0, 1, 2]), r#".[3]?"#, json!(null));
-    gives(json!("asdf"), ".[0]?", []);
+    // Strings can be indexed by numbers, returning a single-character string.
+    // This matches jq's behavior and is more intuitive than returning a byte value.
+    // Negative indices are supported, consistent with array indexing.
+    // Indexing is by Unicode character (code point), not byte.
+    give(json!("asdf"), ".[0]", json!("a"));
+    give(json!("asdf"), ".[-1]", json!("f"));
+    gives(json!("asdf"), ".[0]?", [json!("a")]);
+    give(json!("Möwe"), ".[1]", json!("ö"));
+    give(json!("नमस्ते"), ".[0]", json!("न"));
+    give(json!("नमस्ते"), ".[-1]", json!("े"));
 
     give(json!(1), "[1, 2, 3][.]", json!(2));
 
@@ -112,7 +121,14 @@ fn index_update() {
 
     give(json!([0, 1, 2]), r#".["a", 0]? |= .+1"#, json!([1, 1, 2]));
     give(json!([0, 1, 2]), r#".[3]? |= .+1"#, json!([0, 1, 2]));
-    give(json!("asdf"), ".[0]? |= .+1", json!("asdf"));
+    // String index update: strings can now be updated by character index.
+    // This is consistent with string index access.
+    // The old test expected the string to be unchanged because string indexing
+    // was not supported at all. Now that we support string indexing,
+    // update assignment works on strings as well (by character, not byte).
+    give(json!("asdf"), ".[0] = \"b\"", json!("bsdf"));
+    give(json!("asdf"), ".[-1] = \"g\"", json!("asdg"));
+    give(json!("Möwe"), ".[1] = \"x\"", json!("Mxwe"));
 }
 
 #[test]
