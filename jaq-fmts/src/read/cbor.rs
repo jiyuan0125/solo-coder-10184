@@ -14,7 +14,7 @@ use alloc::{string::String, vec::Vec};
 use ciborium_io::Read;
 use ciborium_ll::{simple, tag, Decoder, Error, Header};
 use core::fmt::{self, Formatter};
-use jaq_json::{Num, Val};
+use jaq_json::{Num, ObjKey, Val};
 use num_bigint::{BigInt, BigUint};
 use std::io;
 
@@ -217,7 +217,7 @@ fn parse<R: Read>(header: Header, decoder: &mut Decoder<R>) -> Result<Val, PErro
         )),
         Header::Map(size) => {
             let o = with_size(size, decoder, |h, d| {
-                Ok((parse(h, d)?, parse(d.pull()?, d)?))
+                Ok((ObjKey::from(parse(h, d)?), parse(d.pull()?, d)?))
             })?;
             Ok(Val::obj(o.into_iter().collect()))
         }

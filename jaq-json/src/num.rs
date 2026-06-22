@@ -158,13 +158,17 @@ fn biguint_from_str_radix(s: &str, radix: u32) -> Option<BigUint> {
         if b == b'_' {
             return Some(None);
         }
-        Some(Some(match b {
+        let d = match b {
             b'0'..=b'9' => b - b'0',
             b'a'..=b'z' => b - b'a' + 10,
             b'A'..=b'Z' => b - b'A' + 10,
             _ => return None,
-        })
-        .filter(|d| *d < radix as u8))
+        };
+        if d < radix as u8 {
+            Some(Some(d))
+        } else {
+            None
+        }
     });
     let digits: Vec<u8> = digits
         .collect::<Option<Vec<_>>>()?
@@ -436,7 +440,18 @@ impl fmt::Display for Num {
             Self::Float(x) if x.is_nan() => write!(f, "NaN"),
             Self::Float(f64::INFINITY) => write!(f, "Infinity"),
             Self::Float(f64::NEG_INFINITY) => write!(f, "-Infinity"),
-            Self::Float(x) => ryu::Buffer::new().format_finite(*x).fmt(f),
+            Self::Float(x) => {
+                let mut buf = ryu::Buffer::new();
+                let s = buf.format_finite(*x);
+                if let Some(e_pos) = s.find('e') {
+                    let exp = &s[e_pos + 1..];
+                    if !exp.starts_with('-') {
+                        write!(f, "{}e+{}", &s[..e_pos], exp)?;
+                        return Ok(());
+                    }
+                }
+                s.fmt(f)
+            }
             Self::Dec(n) => write!(f, "{n}"),
         }
     }

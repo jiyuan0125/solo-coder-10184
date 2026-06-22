@@ -37,7 +37,8 @@ pub type ValXs<'a, T, V = T> = BoxIter<'a, ValX<'a, T, V>>;
 /// This is equivalent to calling `v.map_err(|e| e.into_err())`.
 ///
 /// ~~~
-/// use jaq_core::ValX;
+/// use jaq_core::{ValX, unwrap_valr};
+/// # let valx: ValX<i32, String> = Ok(42);
 /// let result = unwrap_valr(valx);
 /// ~~~
 pub fn unwrap_valr<T, V>(v: ValX<T, V>) -> ValR<T, V>
@@ -58,6 +59,7 @@ where
 ///
 /// ~~~
 /// use jaq_core::{ValX, into_valr};
+/// # let valx: ValX<i32, String> = Ok(42);
 /// let result = into_valr(valx);
 /// ~~~
 pub fn into_valr<T, V>(v: ValX<T, V>) -> ValR<T, V>

@@ -60,7 +60,7 @@ fn encode<W: Write>(v: &Val, encoder: &mut Encoder<W>) -> Result<(), W::Error> {
         Val::Obj(o) => {
             encoder.push(Header::Map(Some(o.len())))?;
             o.iter().try_for_each(|(k, v)| {
-                encode(k, encoder)?;
+                encode(k.as_val(), encoder)?;
                 encode(v, encoder)
             })
         }

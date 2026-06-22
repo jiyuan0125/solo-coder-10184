@@ -227,7 +227,8 @@ macro_rules! format_val {
                 color!(obj, write!($w, "{{"))?;
                 macro_rules! kv {
                     ($kv:expr) => {{
-                        let (k, v) = $kv;
+                        let (k, v): (&$crate::ObjKey, &Val) = $kv;
+                        let k = k.as_val();
                         if $pp.styles.key.is_empty() {
                             $f($w, $pp, $level + 1, k)?
                         } else {

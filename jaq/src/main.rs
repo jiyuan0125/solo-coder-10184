@@ -13,7 +13,7 @@ use jaq_all::fmts::read;
 use jaq_all::fmts::write::{with_stdout, write, Writer};
 use jaq_all::jaq_core::Vars;
 use jaq_all::json::write::{Pp, Styles};
-use jaq_all::json::Val;
+use jaq_all::json::{ObjKey, Val};
 use jaq_all::load::{Color, FileReports, FileReportsDisp, Paint};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -215,14 +215,14 @@ fn binds(cli: &Cli) -> Result<Vec<(String, Val)>, Error> {
     let mut var_val = var_val.collect::<Result<Vec<_>, Error>>()?;
 
     var_val.push(("ARGS".to_string(), args(&positional, &var_val)));
-    let env = std::env::vars().map(|(k, v)| (k.into(), Val::from(v)));
+    let env = std::env::vars().map(|(k, v)| (ObjKey::from(Val::from(k)), Val::from(v)));
     var_val.push(("ENV".to_string(), Val::obj(env.collect())));
 
     Ok(var_val)
 }
 
 fn args(positional: &[Val], named: &[(String, Val)]) -> Val {
-    let key = |k: &str| k.to_string().into();
+    let key = |k: &str| ObjKey::from(Val::from(k.to_string()));
     let positional = positional.iter().cloned();
     let named = named.iter().map(|(var, val)| (key(var), val.clone()));
     let obj = [

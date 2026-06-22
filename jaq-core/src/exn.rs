@@ -233,14 +233,13 @@ impl<V> FromIterator<Part<V>> for Error<V> {
 impl<V: From<String> + Display> Error<V> {
     /// Convert the error into a value to be used by `catch` filters.
     pub fn into_val(self) -> V {
-        if self.contexts.is_empty() {
-            if let Part::Val(v) = self.inner {
-                v
-            } else {
-                V::from(self.to_string())
-            }
-        } else {
-            V::from(self.to_string())
+        // Context is purely informational for display purposes.
+        // When converting to a value for `catch`, we return only the
+        // inner error, preserving the original behavior of `catch`
+        // receiving the raw error message without context prefixes.
+        match self.inner {
+            Part::Val(v) => v,
+            _ => V::from(Self { inner: self.inner, contexts: Vec::new() }.to_string()),
         }
     }
 }

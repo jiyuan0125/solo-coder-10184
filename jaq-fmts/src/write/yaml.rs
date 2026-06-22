@@ -57,7 +57,7 @@ macro_rules! format_yaml {
                 let mut iter = o.iter().peekable();
                 while let Some((k, v)) = iter.next() {
                     nested!(v, iter, {
-                        style!(key, $f($w, &unindented, $level, k))?;
+                        style!(key, $f($w, &unindented, $level, k.as_val()))?;
                         style!(obj, write!($w, ":"))
                     })?
                 }

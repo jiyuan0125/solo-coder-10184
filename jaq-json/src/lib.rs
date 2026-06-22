@@ -17,7 +17,7 @@ mod num;
 pub mod write;
 pub mod read;
 
-use alloc::{borrow::ToOwned, boxed::Box, string::{String, ToString}, vec::Vec};
+use alloc::{borrow::{Cow, ToOwned}, boxed::Box, string::{String, ToString}, vec::Vec};
 use bstr::{BStr, ByteSlice};
 use bytes::{BufMut, Bytes, BytesMut};
 use core::cmp::Ordering;
@@ -63,7 +63,7 @@ pub enum Val {
     /// Array
     Arr(Rc<Vec<Val>>),
     /// Object
-    Obj(Rc<Map<Val, Val>>),
+    Obj(Rc<Map>),
 }
 
 #[cfg(feature = "sync")]
@@ -113,8 +113,69 @@ impl Type {
     }
 }
 
+/// Wrapper for object keys that normalizes numeric keys for comparison and hashing,
+/// but preserves the original key for display/output purposes.
+///
+/// This ensures that numeric keys (e.g., `3`) and their string representations (e.g., `"3"`)
+/// are treated as equivalent keys in objects, matching jq's behavior, while preserving
+/// the original key type for serialization (e.g., YAML output won't quote numeric keys).
+#[derive(Clone, Debug)]
+pub struct ObjKey(Val);
+
+impl ObjKey {
+    pub fn into_inner(self) -> Val {
+        self.0
+    }
+
+    pub fn as_val(&self) -> &Val {
+        &self.0
+    }
+
+    fn normalized(&self) -> Cow<'_, Val> {
+        normalize_key(&self.0)
+    }
+}
+
+impl PartialEq for ObjKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.normalized() == other.normalized()
+    }
+}
+
+impl Eq for ObjKey {}
+
+impl PartialOrd for ObjKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ObjKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.normalized().cmp(&other.normalized())
+    }
+}
+
+impl Hash for ObjKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.normalized().hash(state)
+    }
+}
+
+impl From<Val> for ObjKey {
+    fn from(val: Val) -> Self {
+        ObjKey(val)
+    }
+}
+
+impl From<ObjKey> for Val {
+    fn from(key: ObjKey) -> Self {
+        key.0
+    }
+}
+
 /// Order-preserving map
-pub type Map<K = Val, V = K> = indexmap::IndexMap<K, V, foldhash::fast::RandomState>;
+pub type Map<K = ObjKey, V = Val> = indexmap::IndexMap<K, V, foldhash::fast::RandomState>;
 
 /// Error that can occur during filter execution.
 pub type Error = jaq_core::Error<Val>;
@@ -136,14 +197,14 @@ impl jaq_core::ValT for Val {
     }
 
     fn from_map<I: IntoIterator<Item = (Self, Self)>>(iter: I) -> ValR {
-        Ok(Self::obj(iter.into_iter().map(|(k, v)| (normalize_key(&k), v)).collect()))
+        Ok(Self::obj(iter.into_iter().map(|(k, v)| (ObjKey::from(k), v)).collect()))
     }
 
     fn key_values(self) -> Box<dyn Iterator<Item = Result<(Val, Val), Error>>> {
         let arr_idx = |(i, x)| Ok((Self::from(i as isize), x));
         match self {
             Self::Arr(a) => Box::new(rc_unwrap_or_clone(a).into_iter().enumerate().map(arr_idx)),
-            Self::Obj(o) => Box::new(rc_unwrap_or_clone(o).into_iter().map(Ok)),
+            Self::Obj(o) => Box::new(rc_unwrap_or_clone(o).into_iter().map(|(k, v)| Ok((k.into_inner(), v)))),
             _ => box_once(Err(Error::typ(self, Type::Iter.as_str()))),
         }
     }
@@ -189,7 +250,7 @@ impl jaq_core::ValT for Val {
             Self::Obj(o) => {
                 let iter = rc_unwrap_or_clone(o).into_iter();
                 let iter = iter.filter_map(|(k, v)| f(v).next().map(|v| Ok((k, v?))));
-                Ok(Self::obj(iter.collect::<Result<_, Exn<_>>>()?))
+                Ok(Self::obj(iter.collect::<Result<Map, Exn<_>>>()?))
             }
             v => opt.fail(v, |v| Exn::from(Error::typ(v, Type::Iter.as_str()))),
         }
@@ -202,13 +263,15 @@ impl jaq_core::ValT for Val {
         f: impl Fn(Self) -> I,
     ) -> ValX<'a> {
         if let (Val::BStr(_) | Val::TStr(_) | Val::Arr(_), Val::Obj(o)) = (&self, index) {
-            let range = o.get(&Val::utf8_str("start"))..o.get(&Val::utf8_str("end"));
+            let start_key = ObjKey::from(Val::utf8_str("start"));
+            let end_key = ObjKey::from(Val::utf8_str("end"));
+            let range = o.get(&start_key)..o.get(&end_key);
             return self.map_range(range, opt, f);
         };
         match self {
             Val::Obj(ref mut o) => {
                 use indexmap::map::Entry::{Occupied, Vacant};
-                let key = normalize_key(index);
+                let key = ObjKey::from(index.clone());
                 match Rc::make_mut(o).entry(key) {
                     Occupied(mut e) => {
                         let v = core::mem::take(e.get_mut());
@@ -452,17 +515,17 @@ fn abs_index(i: num::PosUsize, len: usize) -> Option<usize> {
 ///
 /// This ensures that numeric keys and their string representations
 /// are treated equivalently, matching jq's behavior.
-fn normalize_key(k: &Val) -> Val {
+fn normalize_key(k: &Val) -> Cow<'_, Val> {
     match k {
-        Val::Num(n) => Val::utf8_str(n.to_string().into_bytes()),
-        _ => k.clone(),
+        Val::Num(n) => Cow::Owned(Val::utf8_str(n.to_string().into_bytes())),
+        _ => Cow::Borrowed(k),
     }
 }
 
 impl Val {
     /// Construct an object value.
     pub fn obj(m: Map) -> Self {
-        Self::Obj(m.into())
+        Self::Obj(Rc::new(m))
     }
 
     /// Construct a string that is interpreted as UTF-8.
@@ -562,13 +625,15 @@ impl Val {
                 Some(indices.map(Val::from).collect())
             }
             (Val::Obj(o), i) => {
-                let key = normalize_key(i);
+                let key = ObjKey::from(i.clone());
                 o.get(&key).cloned()
             }
             (v @ (Val::BStr(_) | Val::TStr(_) | Val::Arr(_)), Val::Obj(o)) => {
                 use jaq_core::ValT;
-                let start = o.get(&Val::utf8_str("start"));
-                let end = o.get(&Val::utf8_str("end"));
+                let start_key = ObjKey::from(Val::utf8_str("start"));
+                let end_key = ObjKey::from(Val::utf8_str("end"));
+                let start = o.get(&start_key);
+                let end = o.get(&end_key);
                 return v.range(start..end).map(Some);
             }
             (s, _) => return Err(Error::index(s, index.clone())),
@@ -608,7 +673,7 @@ impl From<String> for Val {
 
 impl From<val::Range<Val>> for Val {
     fn from(r: val::Range<Val>) -> Self {
-        let kv = |(k, v): (&str, Option<_>)| v.map(|v| (k.to_owned().into(), v));
+        let kv = |(k, v): (&str, Option<_>)| v.map(|v| (ObjKey::from(Val::from(k.to_owned())), v));
         let kvs = [("start", r.start), ("end", r.end)];
         Val::obj(kvs.into_iter().flat_map(kv).collect())
     }
@@ -647,7 +712,7 @@ impl core::ops::Add for Val {
                 Ok(Arr(l))
             }
             (Obj(mut l), Obj(r)) => {
-                Rc::make_mut(&mut l).extend(r.iter().map(|(k, v)| (normalize_key(k), v.clone())));
+                Rc::make_mut(&mut l).extend(r.iter().map(|(k, v)| (k.clone(), v.clone())));
                 Ok(Obj(l))
             }
             (l, r) => Err(Error::math(l, ops::Math::Add, r)),
@@ -674,7 +739,6 @@ fn obj_merge(l: &mut Rc<Map>, r: Rc<Map>) {
     let l = Rc::make_mut(l);
     let r = rc_unwrap_or_clone(r).into_iter();
     r.for_each(|(k, v)| {
-        let k = normalize_key(&k);
         match (l.get_mut(&k), v) {
             (Some(Val::Obj(l)), Val::Obj(r)) => obj_merge(l, r),
             (Some(l), r) => *l = r,
@@ -787,11 +851,10 @@ impl Ord for Val {
                 _ => {
                     let mut l: Vec<_> = x.iter().collect();
                     let mut r: Vec<_> = y.iter().collect();
-                    l.sort_by_key(|(k, _v)| *k);
-                    r.sort_by_key(|(k, _v)| *k);
-                    // TODO: make this nicer
-                    let kl = l.iter().map(|(k, _v)| k);
-                    let kr = r.iter().map(|(k, _v)| k);
+                    l.sort_by_key(|(k, _v)| k.normalized().into_owned());
+                    r.sort_by_key(|(k, _v)| k.normalized().into_owned());
+                    let kl = l.iter().map(|(k, _v)| k.normalized().into_owned());
+                    let kr = r.iter().map(|(k, _v)| k.normalized().into_owned());
                     let vl = l.iter().map(|(_k, v)| v);
                     let vr = r.iter().map(|(_k, v)| v);
                     kl.cmp(kr).then_with(|| vl.cmp(vr))
@@ -849,8 +912,8 @@ impl Hash for Val {
                 state.write_u8(7);
                 // this is similar to what happens in `Val::cmp`
                 let mut kvs: Vec<_> = o.iter().collect();
-                kvs.sort_by_key(|(k, _v)| *k);
-                kvs.iter().for_each(|(k, v)| (k, v).hash(state));
+                kvs.sort_by_key(|(k, _v)| k.normalized().into_owned());
+                kvs.iter().for_each(|(k, v)| (k.normalized().into_owned(), v).hash(state));
             }
         }
     }

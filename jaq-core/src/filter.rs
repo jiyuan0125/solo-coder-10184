@@ -714,9 +714,13 @@ impl Id {
                 let s = cv.0.clone();
                 let c = c.clone();
                 let f_clone = f.clone();
-                try_catch_run(t.update(cv, f), move |e| {
-                    c.update((s.clone(), e.into_val()), f_clone.clone())
-                })
+                let result = try_catch_run(t.run((cv.0.clone(), cv.1)), move |e| {
+                    c.run((s.clone(), e.into_val()))
+                });
+                Box::new(result.flat_map(move |v| match v {
+                    Ok(v) => f_clone.clone()(v),
+                    Err(e) => box_once(Err(e)),
+                }))
             }
             Ast::Label(id) => label_run(cv, |cv| id.update(cv, f.clone())),
 

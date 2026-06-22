@@ -2,14 +2,23 @@ pub use jaq_json::{Error, Val, ValR};
 use serde_json::{from_value, Value};
 
 fn yields(x: Val, code: &str, ys: impl Iterator<Item = ValR>) {
+    use jaq_core::data::JustLut;
     use jaq_core::load::{Arena, File, Loader};
     eprintln!("{}", code.replace('\n', " "));
 
     let arena = Arena::default();
-    let loader = Loader::new(jaq_core::defs());
+    let loader = Loader::new(
+        jaq_core::defs()
+            .chain(jaq_std::defs())
+            .chain(jaq_json::defs()),
+    );
     let modules = loader.load(&arena, File { path: (), code }).unwrap();
     let filter = jaq_core::Compiler::default()
-        .with_funs(jaq_core::funs())
+        .with_funs(
+            jaq_core::funs::<JustLut<Val>>()
+                .chain(jaq_std::funs::<JustLut<Val>>())
+                .chain(jaq_json::funs::<JustLut<Val>>()),
+        )
         .compile(modules)
         .unwrap();
     filter.yields(x, ys)

@@ -1,5 +1,5 @@
 //! TOML support.
-use jaq_json::{Num, Val};
+use jaq_json::{Num, ObjKey, Val};
 use toml_span::{Error, Value};
 
 /// Parse a TOML document from a string.
@@ -20,7 +20,7 @@ fn from(mut v: Value) -> Val {
             kvs.sort_by_key(|(k, _v)| k.span.start);
             let kvs = kvs
                 .into_iter()
-                .map(|(k, v)| (Val::from(k.name.into_owned()), from(v)));
+                .map(|(k, v)| (ObjKey::from(Val::from(k.name.into_owned())), from(v)));
             Val::obj(kvs.collect())
         }
     }

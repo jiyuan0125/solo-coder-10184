@@ -2,7 +2,7 @@
 use alloc::vec::Vec;
 use bytes::Bytes;
 use core::fmt::{self, Display, Formatter};
-use jaq_json::{bstr, write_utf8, Num, Val};
+use jaq_json::{bstr, write_utf8, Num, ObjKey, Val};
 
 /// Serialisation error.
 #[derive(Debug)]
@@ -178,7 +178,7 @@ fn val_key(v: &Val) -> Result<Key<'_>, Error> {
 }
 
 fn val_value<'a>(v: &'a Val) -> Result<Value<'a>, Error> {
-    let kvs = |(k, v)| Ok((val_key(k)?, val_value(v)?));
+    let kvs = |(k, v): (&'a ObjKey, &'a Val)| Ok((val_key(k.as_val())?, val_value(v)?));
     Ok(match v {
         Val::Null | Val::BStr(_) => Err(Error::Val(v.clone()))?,
         Val::Bool(b) => Value::Boolean(*b),

@@ -2,7 +2,7 @@
 use alloc::{borrow::Cow, format, string::String, vec::Vec};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use core::fmt::{self, Formatter};
-use jaq_json::{Num, Val};
+use jaq_json::{Num, ObjKey, Val};
 use saphyr_parser::{Event, Input, Parser, ScalarStyle, ScanError, Tag};
 
 /// Parse a stream of YAML documents.
@@ -101,12 +101,12 @@ impl<'input, T: Input> State<'input, T> {
         }
     }
 
-    fn parse_map_entry(&mut self) -> Option<Result<(Val, Val), Error>> {
+    fn parse_map_entry(&mut self) -> Option<Result<(ObjKey, Val), Error>> {
         match self.next() {
             Ok((Event::MappingEnd, _)) => None,
             Ok((next, span)) => Some(self.parse_val((next, span)).and_then(|k| {
                 let next = self.next()?;
-                Ok((k, self.parse_val(next)?))
+                Ok((ObjKey::from(k), self.parse_val(next)?))
             })),
             Err(e) => Some(Err(e)),
         }

@@ -1,5 +1,5 @@
 //! JSON support.
-use crate::{Map, Num, Val};
+use crate::{Map, Num, ObjKey, Val};
 use alloc::{string::ToString, vec::Vec};
 use core::fmt::{self, Formatter};
 use hifijson::token::{Expect, Lex};
@@ -140,7 +140,7 @@ fn parse<L: LexAlloc>(next: u8, lexer: &mut L) -> Result<Val, hifijson::Error> {
                 let key = parse(next, lexer)?;
                 lexer.expect(ws_tk, b':').ok_or(Expect::Colon)?;
                 let value = parse(ws_tk(lexer).ok_or(Expect::Value)?, lexer)?;
-                obj.insert(key, value);
+                obj.insert(ObjKey::from(key), value);
                 Ok::<_, hifijson::Error>(())
             })?;
             obj

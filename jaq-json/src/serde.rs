@@ -1,4 +1,4 @@
-use crate::{Num, Val};
+use crate::{Num, ObjKey, Val};
 use alloc::{fmt, string::String};
 use serde_core::de::{Error, MapAccess, SeqAccess, Visitor};
 use serde_core::{Deserialize, Deserializer};
@@ -71,7 +71,7 @@ impl<'de> Visitor<'de> for ValueVisitor {
     }
 
     fn visit_map<V: MapAccess<'de>>(self, mut visitor: V) -> Result<Val, V::Error> {
-        core::iter::from_fn(|| visitor.next_entry().transpose())
+        core::iter::from_fn(|| visitor.next_entry().transpose().map(|res| res.map(|(k, v): (Val, Val)| (ObjKey::from(k), v))))
             .collect::<Result<_, _>>()
             .map(Val::obj)
     }

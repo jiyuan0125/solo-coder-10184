@@ -121,14 +121,16 @@ pub type Filter<D> = compile::Filter<Native<D>>;
 /// Lookup table for terms and functions.
 pub type Lut<D> = compile::Lut<Native<D>>;
 
-impl<V: ValT + 'static> Filter<data::JustLut<V>> {
+impl<V: ValT + core::fmt::Debug + 'static> Filter<data::JustLut<V>> {
     /// Run a filter on given input, panic if it does not yield the given output.
     ///
     /// This is for testing purposes.
     pub fn yields(&self, x: V, ys: impl Iterator<Item = ValR<V>>) {
+        use alloc::vec::Vec;
         let ctx = Ctx::<data::JustLut<V>>::new(&self.lut, Vars::new([]));
-        let out = self.id.run((ctx, x)).map(unwrap_valr);
-        assert!(out.eq(ys));
+        let out: Vec<_> = self.id.run((ctx, x)).map(unwrap_valr).collect();
+        let ys: Vec<_> = ys.collect();
+        assert!(out.eq(&ys), "expected: {:?}, obtained: {:?}", ys, out);
     }
 }
 

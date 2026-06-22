@@ -540,7 +540,12 @@ fn try_catch_update() {
 fn label_update() {
     // Update on label block should work
     give(json!(1), "label $out | . |= . + 1", json!(2));
-    give(json!([1, 2, 3]), "[label $out | .[] |= . * 2]", json!([2, 4, 6]));
+    // Note: .[] |= . * 2 returns the entire updated array [2,4,6],
+    // not three separate values. This is consistent with |= semantics
+    // where the update operator returns the whole updated container.
+    // Therefore [label $out | .[] |= . * 2] wraps it in another array,
+    // resulting in [[2,4,6]].
+    give(json!([1, 2, 3]), "[label $out | .[] |= . * 2]", json!([[2, 4, 6]]));
 }
 
 #[test]
@@ -565,8 +570,10 @@ fn nan_comparison_symmetric() {
 #[test]
 fn nan_sort() {
     // NaN should sort consistently (greater than everything)
-    give(json!([3, 1, 2]), "[.[] | tonumber? // nan] | sort | .[0]", json!(1));
-    give(json!([3, 1, 2]), "[.[] | tonumber? // nan] | sort | .[-1] == nan", json!(true));
+    // Note: added a non-number element "x" so that tonumber? fails and // nan produces NaN.
+    // Without it, all elements are valid numbers and no NaN is produced.
+    give(json!([3, 1, 2, "x"]), "[.[] | tonumber? // nan] | sort | .[0]", json!(1));
+    give(json!([3, 1, 2, "x"]), "[.[] | tonumber? // nan] | sort | .[-1] == nan", json!(true));
 }
 
 #[test]

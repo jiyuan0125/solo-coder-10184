@@ -2,7 +2,7 @@
 use alloc::string::{String, ToString};
 use alloc::{borrow::ToOwned, format, vec::Vec};
 use core::fmt::{self, Formatter};
-use jaq_json::Val;
+use jaq_json::{ObjKey, Val};
 use xmlparser::{ElementEnd, ExternalId, StrSpan, TextPos, Token, Tokenizer};
 
 /// Parse a stream of root XML values.
@@ -112,7 +112,7 @@ fn tac(tag: &Tag, tokens: &mut Tokenizer) -> Result<Val, Error> {
                 value,
                 ..
             } => attrs.push((
-                Tag(prefix, local).to_string().into(),
+                ObjKey::from(Val::from(Tag(prefix, local).to_string())),
                 value.as_str().to_owned().into(),
             )),
             Token::ElementEnd { end, .. } => match end {
@@ -149,13 +149,13 @@ fn doctype(name: &str, external: Option<ExternalId>, internal: Option<&str>) -> 
 fn make_obj<T: Into<Val>, const N: usize>(arr: [(&str, Option<T>); N]) -> Val {
     let iter = arr
         .into_iter()
-        .flat_map(|(k, v)| v.map(|v| (k.to_owned().into(), v.into())));
+        .flat_map(|(k, v)| v.map(|v| (ObjKey::from(Val::from(k.to_owned())), v.into())));
     Val::obj(iter.collect())
 }
 
 fn parse(tk: Token, tokens: &mut Tokenizer) -> Result<Val, Error> {
     let ss_val = |ss: StrSpan| ss.as_str().to_owned().into();
-    let singleton = |k: &str, v| Val::obj(core::iter::once((k.to_string().into(), v)).collect());
+    let singleton = |k: &str, v| Val::obj(core::iter::once((ObjKey::from(Val::from(k.to_string())), v)).collect());
 
     Ok(match tk {
         Token::Declaration {

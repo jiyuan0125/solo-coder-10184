@@ -18,7 +18,7 @@ def isobject:  . >= {};
 # Numbers
 def nan:      0 / 0;
 def infinite: 1 / 0;
-def isnan:      . < nan and nan < .;
+def isnan:      . == nan;
 def isinfinite: . == infinite or  . == -infinite;
 def isfinite:   isnumber and (isinfinite | not);
 def isnormal:   isnumber and ((. == 0 or isnan or isinfinite) | not);
