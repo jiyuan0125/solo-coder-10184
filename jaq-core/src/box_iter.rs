@@ -1,5 +1,6 @@
 //! Boxed iterators.
 
+use crate::exn::Exn;
 use alloc::boxed::Box;
 
 /// A boxed iterator.
@@ -11,6 +12,16 @@ pub type Results<'a, T, E> = BoxIter<'a, Result<T, E>>;
 /// Return a boxed iterator that yields a single element.
 pub fn box_once<'a, T: 'a>(x: T) -> BoxIter<'a, T> {
     Box::new(core::iter::once(x))
+}
+
+/// Wrap all errors produced by an iterator with contextual information.
+///
+/// Non-error exceptions (halt, break, tail call) are passed through unchanged.
+pub fn with_err_ctx<'a, T: 'a, V: 'a + From<alloc::string::String>>(
+    iter: Results<'a, T, Exn<'a, V>>,
+    ctx: &'static str,
+) -> Results<'a, T, Exn<'a, V>> {
+    Box::new(iter.map(move |r| r.map_err(|e| e.with_err_ctx(ctx))))
 }
 
 /// If `x` is an `Err`, return it as iterator, else apply `f` to `x` and return its output.

@@ -1,6 +1,6 @@
 //! Filter execution.
 
-use crate::box_iter::{self, box_once, flat_map_then, flat_map_then_with, flat_map_with, map_with};
+use crate::box_iter::{self, box_once, flat_map_then, flat_map_then_with, flat_map_with, map_with, with_err_ctx};
 use crate::compile::{Bind, CallType, Fold, Pattern, Term as Ast, TermId as Id};
 use crate::data::{DataT, HasLut};
 use crate::fold::fold;
@@ -482,13 +482,14 @@ impl Id {
 
             // `l | r`
             Ast::Pipe(l, None, r) => {
-                flat_map_then_with(l.run((cv.0.clone(), cv.1)), cv.0, move |y, ctx| {
-                    r.run((ctx, y))
-                })
+                let result = flat_map_then_with(l.run((cv.0.clone(), cv.1)), cv.0, move |y, ctx| {
+                    with_err_ctx(r.run((ctx, y)), "pipe stage")
+                });
+                with_err_ctx(result, "pipe")
             }
             // `l as $x | r`, `l as [...] | r`, or `l as {...} | r`
             Ast::Pipe(l, Some(pat), r) => pipe(l, cv, move |cv, y| {
-                bind_run(pat, r, cv, y, |f, cv| f.run(cv))
+                with_err_ctx(bind_run(pat, r, cv, y, |f, cv| f.run(cv)), "pipe with binding")
             }),
             Ast::Comma(l, r) => Box::new(l.run(cv.clone()).chain(lazy(|| r.run(cv)))),
             Ast::Alt(l, r) => {
@@ -508,11 +509,14 @@ impl Id {
                     let cv = cv.clone();
                     crate::into_iter::collect_if_once(move || i.run(cv))
                 });
-                flat_map_then_with(f.run(cv), path, |y, path| {
-                    flat_map_then_with(path.explode(), y, |path, y| {
-                        Box::new(path.run(y).map(|r| r.map_err(Exn::from)))
-                    })
-                })
+                with_err_ctx(
+                    flat_map_then_with(f.run(cv), path, |y, path| {
+                        flat_map_then_with(path.explode(), y, |path, y| {
+                            Box::new(path.run(y).map(|r| r.map_err(Exn::from)))
+                        })
+                    }),
+                    "path expression",
+                )
             }
 
             Ast::Update(path, f) => path.update(
@@ -537,10 +541,14 @@ impl Id {
                     Box::new(r.run(cv).map(|r| Ok(D::V::from(r?.as_bool()))))
                 }
             }),
-            Ast::Math(l, op, r) => Box::new(cartesian(l, r, cv).map(|(x, y)| Ok(op.run(x?, y?)?))),
-            Ast::Cmp(l, op, r) => {
-                Box::new(cartesian(l, r, cv).map(|(x, y)| Ok(D::V::from(op.run(&x?, &y?)))))
-            }
+            Ast::Math(l, op, r) => with_err_ctx(
+                Box::new(cartesian(l, r, cv).map(|(x, y)| Ok(op.run(x?, y?)?))),
+                "arithmetic operation",
+            ),
+            Ast::Cmp(l, op, r) => with_err_ctx(
+                Box::new(cartesian(l, r, cv).map(|(x, y)| Ok(D::V::from(op.run(&x?, &y?))))),
+                "comparison operation",
+            ),
 
             Ast::Fold(xs, pat, init, update, fold_type) => {
                 let xs = rc_lazy_list::List::from_iter(run_and_bind(xs, cv.clone(), pat));
@@ -560,11 +568,17 @@ impl Id {
                 };
                 let cvs = bind_vars(args, cv.0.clone().skip_vars(*skip), cv, Clone::clone);
                 let (into, from) = (exn::CallInput::Run, exn::CallInput::unwrap_run);
-                def_run(id, call_typ, cvs, Id::run, with_vars, into, from)
+                with_err_ctx(
+                    def_run(id, call_typ, cvs, Id::run, with_vars, into, from),
+                    "function call",
+                )
             }
             Ast::Native(id, args) => {
                 let cvs = bind_vars(args, cv.0.with_vars(Vars::new([])), cv, Clone::clone);
-                flat_map_then(cvs, |cv| (cv.0.lut().funs[*id].run)(cv))
+                with_err_ctx(
+                    flat_map_then(cvs, |cv| (cv.0.lut().funs[*id].run)(cv)),
+                    "builtin function",
+                )
             }
             Ast::Label(id) => label_run(cv, |cv| id.run(cv)),
         }

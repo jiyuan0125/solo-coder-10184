@@ -136,14 +136,45 @@ impl jaq_core::ValT for Val {
     }
 
     fn from_map<I: IntoIterator<Item = (Self, Self)>>(iter: I) -> ValR {
-        Ok(Self::obj(iter.into_iter().collect()))
+        Ok(Self::obj(iter.into_iter().map(|(k, v)| (normalize_key(&k), v)).collect()))
     }
 
     fn key_values(self) -> Box<dyn Iterator<Item = Result<(Val, Val), Error>>> {
         let arr_idx = |(i, x)| Ok((Self::from(i as isize), x));
         match self {
             Self::Arr(a) => Box::new(rc_unwrap_or_clone(a).into_iter().enumerate().map(arr_idx)),
-            Self::Obj(o) => Box::new(rc_unwrap_or_clone(o).into_iter().map(Ok)),
+            Self::Obj(o) => Box::new(
+                rc_unwrap_or_clone(o)
+                    .into_iter()
+                    .map(|(k, v)| Ok((normalize_key(&k), v))),
+            ),
+            Self::BStr(b) => {
+                let b = *b;
+                let v: Vec<_> = b
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, byte)| {
+                        Ok((
+                            Self::from(i as isize),
+                            Self::byte_str(Bytes::copy_from_slice(&[byte])),
+                        ))
+                    })
+                    .collect();
+                Box::new(v.into_iter())
+            }
+            Self::TStr(b) => {
+                let b = *b;
+                let v: Vec<_> = b
+                    .char_indices()
+                    .map(|(start, _end, ch)| {
+                        Ok((
+                            Self::from(b[..start].chars().count() as isize),
+                            Self::utf8_str(b.slice(start..start + ch.len_utf8())),
+                        ))
+                    })
+                    .collect();
+                Box::new(v.into_iter())
+            }
             _ => box_once(Err(Error::typ(self, Type::Iter.as_str()))),
         }
     }
@@ -152,6 +183,24 @@ impl jaq_core::ValT for Val {
         match self {
             Self::Arr(a) => Box::new(rc_unwrap_or_clone(a).into_iter().map(Ok)),
             Self::Obj(o) => Box::new(rc_unwrap_or_clone(o).into_iter().map(|(_k, v)| Ok(v))),
+            Self::BStr(b) => {
+                let b = *b;
+                let v: Vec<_> = b
+                    .into_iter()
+                    .map(|byte| Ok(Self::byte_str(Bytes::copy_from_slice(&[byte]))))
+                    .collect();
+                Box::new(v.into_iter())
+            }
+            Self::TStr(b) => {
+                let b = *b;
+                let v: Vec<_> = b
+                    .char_indices()
+                    .map(|(start, _end, ch)| {
+                        Ok(Self::utf8_str(b.slice(start..start + ch.len_utf8())))
+                    })
+                    .collect();
+                Box::new(v.into_iter())
+            }
             _ => box_once(Err(Error::typ(self, Type::Iter.as_str()))),
         }
     }
@@ -188,8 +237,42 @@ impl jaq_core::ValT for Val {
             }
             Self::Obj(o) => {
                 let iter = rc_unwrap_or_clone(o).into_iter();
-                let iter = iter.filter_map(|(k, v)| f(v).next().map(|v| Ok((k, v?))));
+                let iter = iter.filter_map(|(k, v)| f(v).next().map(|v| Ok((normalize_key(&k), v?))));
                 Ok(Self::obj(iter.collect::<Result<_, Exn<_>>>()?))
+            }
+            Self::BStr(b) => {
+                let b = *b;
+                let chars: Vec<_> = b
+                    .into_iter()
+                    .map(|byte| Self::byte_str(Bytes::copy_from_slice(&[byte])))
+                    .collect();
+                let iter = chars.into_iter().flat_map(f);
+                let results: Result<Vec<Self>, Exn<_>> = iter.collect();
+                Ok(Self::byte_str(
+                    results?
+                        .into_iter()
+                        .map(|v| v.into_byte_str())
+                        .collect::<Result<Vec<_>, _>>()?
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>(),
+                ))
+            }
+            Self::TStr(b) => {
+                let b = *b;
+                let chars: Vec<_> = b
+                    .char_indices()
+                    .map(|(start, _end, ch)| {
+                        Self::utf8_str(b.slice(start..start + ch.len_utf8()))
+                    })
+                    .collect();
+                let iter = chars.into_iter().flat_map(f);
+                let results: Result<Vec<Self>, Exn<_>> = iter.collect();
+                let mut buf = BytesMut::new();
+                for v in results? {
+                    buf.put(&*v.into_utf8_str()?);
+                }
+                Ok(Self::utf8_str(buf.freeze()))
             }
             v => opt.fail(v, |v| Exn::from(Error::typ(v, Type::Iter.as_str()))),
         }
@@ -208,13 +291,12 @@ impl jaq_core::ValT for Val {
         match self {
             Val::Obj(ref mut o) => {
                 use indexmap::map::Entry::{Occupied, Vacant};
-                match Rc::make_mut(o).entry(index.clone()) {
+                let idx = normalize_key(index);
+                match Rc::make_mut(o).entry(idx) {
                     Occupied(mut e) => {
                         let v = core::mem::take(e.get_mut());
                         match f(v).next().transpose()? {
                             Some(y) => e.insert(y),
-                            // this runs in constant time, at the price of
-                            // changing the order of the elements
                             None => e.swap_remove(),
                         };
                     }
@@ -243,7 +325,56 @@ impl jaq_core::ValT for Val {
                 }
                 Ok(self)
             }
-            _ => opt.fail(self, |v| Exn::from(Error::typ(v, Type::Iter.as_str()))),
+            Val::BStr(b) => {
+                let bytes: Bytes = *b;
+                let oob = || Error::str(format_args!("index {index} out of bounds"));
+                let abs_or = |i| abs_index(i, bytes.len()).ok_or_else(oob);
+                let i = match index.as_pos_usize().and_then(abs_or) {
+                    Ok(i) => i,
+                    Err(e) => return opt.fail(Val::byte_str(bytes), |_| Exn::from(e)),
+                };
+                let old_byte = bytes[i];
+                let old_val = Self::byte_str(Bytes::copy_from_slice(&[old_byte]));
+                let new_val_opt = f(old_val).next().transpose()?;
+                if let Some(new_val) = new_val_opt {
+                    let new_bytes = new_val.into_byte_str()?;
+                    let mut bm = BytesMut::from(bytes);
+                    bytes_splice(&mut bm, i, 1, &new_bytes);
+                    Ok(Val::byte_str(bm.freeze()))
+                } else {
+                    let mut bm = BytesMut::from(bytes);
+                    bytes_splice(&mut bm, i, 1, &[]);
+                    Ok(Val::byte_str(bm.freeze()))
+                }
+            }
+            Val::TStr(b) => {
+                let bytes: Bytes = *b;
+                let pos = match index.as_pos_usize() {
+                    Ok(p) => p,
+                    Err(e) => return opt.fail(Val::utf8_str(bytes), |_| Exn::from(e)),
+                };
+                let (start, take) = match char_byte_boundary(&bytes, pos) {
+                    Some(x) => x,
+                    None => {
+                        return opt.fail(Val::utf8_str(bytes), |_| {
+                            Exn::from(Error::str(format_args!("index {index} out of bounds")))
+                        })
+                    }
+                };
+                let old_val = Self::utf8_str(bytes.slice(start..start + take));
+                let new_val_opt = f(old_val).next().transpose()?;
+                if let Some(new_val) = new_val_opt {
+                    let new_bytes = new_val.into_utf8_str()?;
+                    let mut bm = BytesMut::from(bytes);
+                    bytes_splice(&mut bm, start, take, &new_bytes);
+                    Ok(Val::utf8_str(bm.freeze()))
+                } else {
+                    let mut bm = BytesMut::from(bytes);
+                    bytes_splice(&mut bm, start, take, &[]);
+                    Ok(Val::utf8_str(bm.freeze()))
+                }
+            }
+            v => opt.fail(v, |v| Exn::from(Error::typ(v, Type::Iter.as_str()))),
         }
     }
 
@@ -396,17 +527,47 @@ fn bytes_splice(b: &mut BytesMut, skip: usize, take: usize, replace: &[u8]) {
 
 /// If a range bound is given, absolutise and clip it between 0 and `len`,
 /// else return `default`.
+///
+/// Out-of-bounds negative indices are clamped to 0, and out-of-bounds
+/// positive indices are clamped to `len`, matching jq semantics.
 fn abs_bound(i: Option<num::PosUsize>, len: usize, default: usize) -> Result<usize, Error> {
     i.map_or(Ok(default), |i| {
-        i.wrap(len)
-            .ok_or_else(|| Error::str(format_args!("slice bounds out of range")))
-            .map(|i| core::cmp::min(i, len))
+        Ok(match i.wrap(len) {
+            Some(v) => core::cmp::min(v, len),
+            None => {
+                // Negative index with magnitude > len: clamp to 0 for start, len for end
+                if i.0 { len } else { 0 }
+            }
+        })
     })
 }
 
 /// Absolutise an index and return result if it is inside [0, len).
 fn abs_index(i: num::PosUsize, len: usize) -> Option<usize> {
     i.wrap(len).filter(|i| *i < len)
+}
+
+/// Return (byte_start, byte_len) of the character at the given char index,
+/// supporting negative indices. Returns None if index is out of bounds.
+fn char_byte_boundary(b: &[u8], idx: num::PosUsize) -> Option<(usize, usize)> {
+    let len = b.chars().count();
+    let abs = abs_index(idx, len)?;
+    let mut chars = b.char_indices();
+    let (start, _end, ch) = chars.nth(abs)?;
+    Some((start, ch.len_utf8()))
+}
+
+/// Normalize an object key: numbers are converted to their string representation.
+/// This matches jq behavior where `{(2): 1}` and `{("2"): 1}` are equivalent.
+fn normalize_key(k: &Val) -> Val {
+    match k {
+        Val::Num(n) if n.is_int() => {
+            let mut buf = write::Buf(Vec::new());
+            write::write_buf(&mut buf, &write::Pp::default(), 0, k).unwrap();
+            Val::utf8_str(Bytes::from_owner(buf.0))
+        }
+        _ => k.clone(),
+    }
 }
 
 impl Val {
@@ -489,7 +650,11 @@ impl Val {
             (Val::BStr(a), Val::Num(i @ (Num::Int(_) | Num::BigInt(_)))) => i
                 .as_pos_usize()
                 .and_then(|i| abs_index(i, a.len()))
-                .map(|i| usize::from(a[i]).into()),
+                .map(|i| Val::byte_str(Bytes::copy_from_slice(&[a[i]]))),
+            (Val::TStr(a), Val::Num(i @ (Num::Int(_) | Num::BigInt(_)))) => i
+                .as_pos_usize()
+                .and_then(|i| char_byte_boundary(&a, i))
+                .map(|(start, len)| Val::utf8_str(a.slice(start..start + len))),
             (Val::Arr(a), Val::Num(i @ (Num::Int(_) | Num::BigInt(_)))) => i
                 .as_pos_usize()
                 .and_then(|i| abs_index(i, a.len()))
@@ -501,7 +666,11 @@ impl Val {
                 let indices = iw.filter_map(|(i, w)| (w == **y).then_some(i));
                 Some(indices.map(Val::from).collect())
             }
-            (Val::Obj(o), i) => o.get(i).cloned(),
+            (Val::Obj(o), i) => {
+                // Try the original key first, then try normalized key for numeric lookups
+                let normalized = normalize_key(i);
+                o.get(i).cloned().or_else(|| o.get(&normalized).cloned())
+            }
             (v @ (Val::BStr(_) | Val::TStr(_) | Val::Arr(_)), Val::Obj(o)) => {
                 use jaq_core::ValT;
                 let start = o.get(&Val::utf8_str("start"));
@@ -584,7 +753,7 @@ impl core::ops::Add for Val {
                 Ok(Arr(l))
             }
             (Obj(mut l), Obj(r)) => {
-                Rc::make_mut(&mut l).extend(r.iter().map(|(k, v)| (k.clone(), v.clone())));
+                Rc::make_mut(&mut l).extend(r.iter().map(|(k, v)| (normalize_key(k), v.clone())));
                 Ok(Obj(l))
             }
             (l, r) => Err(Error::math(l, ops::Math::Add, r)),
@@ -610,11 +779,14 @@ impl core::ops::Sub for Val {
 fn obj_merge(l: &mut Rc<Map>, r: Rc<Map>) {
     let l = Rc::make_mut(l);
     let r = rc_unwrap_or_clone(r).into_iter();
-    r.for_each(|(k, v)| match (l.get_mut(&k), v) {
-        (Some(Val::Obj(l)), Val::Obj(r)) => obj_merge(l, r),
-        (Some(l), r) => *l = r,
-        (None, r) => {
-            l.insert(k, r);
+    r.for_each(|(k, v)| {
+        let nk = normalize_key(&k);
+        match (l.get_mut(&nk), v) {
+            (Some(Val::Obj(l)), Val::Obj(r)) => obj_merge(l, r),
+            (Some(l), r) => *l = r,
+            (None, r) => {
+                l.insert(nk, r);
+            }
         }
     });
 }

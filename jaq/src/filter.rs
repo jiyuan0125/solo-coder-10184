@@ -1,7 +1,7 @@
 //! Filter parsing, compilation, and execution.
 use crate::{funs, read, Error, Runner, Val};
 use jaq_all::data::Filter;
-use jaq_all::jaq_core::{compile, load, Exn, ValT, Vars};
+use jaq_all::jaq_core::{compile, load, ValT, Vars};
 use jaq_all::load::{compile_errors, load_errors, FileReports};
 use std::{io, path::PathBuf};
 
@@ -54,10 +54,10 @@ pub(crate) fn run(
         let v = match v {
             Ok(v) => v,
             Err(e) => {
-                if let Ok(code) = e.get_halt() {
-                    return Err(Error::Halt(code));
-                }
-                return Err(Error::Jaq(e.into_err()));
+                return match e.get_halt() {
+                    Ok(code) => Err(Error::Halt(code)),
+                    Err(e) => Err(Error::Jaq(e.into_err())),
+                };
             }
         };
 
